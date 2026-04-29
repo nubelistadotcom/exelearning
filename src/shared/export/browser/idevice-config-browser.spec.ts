@@ -264,21 +264,24 @@ describe('idevice-config-browser', () => {
             const files = getIdeviceExportFiles('image-gallery', '.css');
             expect(files).toContain('image-gallery.css');
             expect(files).toContain('simple-lightbox.min.css');
-            expect(files[0]).toBe('image-gallery.css'); // main file first
+            // Dependencies first, main file last
+            expect(files[files.length - 1]).toBe('image-gallery.css');
         });
 
         it('includes html2canvas.js for checklist', () => {
             const files = getIdeviceExportFiles('checklist', '.js');
             expect(files).toContain('checklist.js');
             expect(files).toContain('html2canvas.js');
-            expect(files[0]).toBe('checklist.js'); // main file first
+            // Dependencies first, main file last
+            expect(files[files.length - 1]).toBe('checklist.js');
         });
 
         it('includes html2canvas.js for progress-report', () => {
             const files = getIdeviceExportFiles('progress-report', '.js');
             expect(files).toContain('progress-report.js');
             expect(files).toContain('html2canvas.js');
-            expect(files[0]).toBe('progress-report.js'); // main file first
+            // Dependencies first, main file last
+            expect(files[files.length - 1]).toBe('progress-report.js');
         });
 
         it('includes mansory-jq.js for select-media-files', () => {
@@ -291,6 +294,20 @@ describe('idevice-config-browser', () => {
             const files = getIdeviceExportFiles('image-gallery', '.js');
             expect(files).toContain('image-gallery.js');
             expect(files).toContain('simple-lightbox.min.js');
+        });
+
+        it('includes model-viewer and Three.js dependencies for three-d-viewer', () => {
+            const files = getIdeviceExportFiles('three-d-viewer', '.js');
+            expect(files).toContain('three-d-viewer.js');
+            expect(files).toContain('model-viewer.min.js');
+            expect(files).toContain('three.module.min.js');
+            expect(files).toContain('STLLoader.js');
+            expect(files).toContain('OrbitControls.js');
+            // Dependencies first, main file last
+            expect(files[files.length - 1]).toBe('three-d-viewer.js');
+            // All dependencies should be before the main file
+            expect(files.indexOf('model-viewer.min.js')).toBeLessThan(files.indexOf('three-d-viewer.js'));
+            expect(files.indexOf('three.module.min.js')).toBeLessThan(files.indexOf('three-d-viewer.js'));
         });
 
         it('returns just main file for iDevice without dependencies', () => {

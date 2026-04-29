@@ -68,6 +68,7 @@ export function getIdeviceConfig(type: string): IdeviceConfigCache {
         'true-or-false',
         'scrambled-list',
         'magnifier',
+        'three-d-viewer',
     ];
     const isJson = jsonIdevices.includes(cssClass) || jsonIdevices.includes(normalized);
 
@@ -128,6 +129,7 @@ const IDEVICE_JS_DEPENDENCIES: Record<string, string[]> = {
     'progress-report': ['html2canvas.js'],
     'select-media-files': ['mansory-jq.js'],
     'image-gallery': ['simple-lightbox.min.js'],
+    'three-d-viewer': ['model-viewer.min.js', 'three.module.min.js', 'STLLoader.js', 'OrbitControls.js'],
 };
 
 /**
@@ -150,11 +152,13 @@ export function getIdeviceExportFiles(typeName: string, extension: '.js' | '.css
     const mainFile = `${typeName}${extension}`;
 
     if (extension === '.js') {
+        // Dependencies first, main file LAST
+        // This ensures libraries like model-viewer load before the main iDevice script
         const dependencies = IDEVICE_JS_DEPENDENCIES[typeName] || [];
-        return [mainFile, ...dependencies];
+        return [...dependencies, mainFile];
     }
 
-    // For CSS, check for known dependencies (e.g., SimpleLightbox for image-gallery)
+    // For CSS, dependencies first, main file last
     const cssDependencies = IDEVICE_CSS_DEPENDENCIES[typeName] || [];
-    return [mainFile, ...cssDependencies];
+    return [...cssDependencies, mainFile];
 }
