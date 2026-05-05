@@ -445,3 +445,14 @@ export function mount(container: HTMLElement, options: MountOptions = {}): Edito
 }
 
 export { SlideFabricEditor };
+
+// Explicit global exposure: Bun.build({ format: 'iife', globalName: '...' })
+// does not always attach the IIFE result to the named global, so the bridge
+// (edition/slide.js) can't find `window.__slideEditorInit.mount`. Assigning
+// here guarantees the global is set when the bundle executes.
+(globalThis as unknown as { __slideEditorInit: { mount: typeof mount; parsePrevious: typeof parsePrevious; sanitizeSvg: typeof sanitizeSvg; SlideFabricEditor: typeof SlideFabricEditor } }).__slideEditorInit = {
+    mount,
+    parsePrevious,
+    sanitizeSvg,
+    SlideFabricEditor,
+};
