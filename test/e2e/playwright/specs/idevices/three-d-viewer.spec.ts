@@ -195,7 +195,10 @@ test.describe('3D Viewer iDevice', () => {
             expect(inputValue.endsWith('.glb')).toBe(true);
         });
 
-        test('should upload STL model and convert to GLB', async ({ authenticatedPage, createProject }) => {
+        test('should upload STL model and keep it as STL (rendered natively with Three.js)', async ({
+            authenticatedPage,
+            createProject,
+        }) => {
             const page = authenticatedPage;
 
             const projectUuid = await createProject(page, '3D Viewer STL Upload Test');
@@ -208,21 +211,21 @@ test.describe('3D Viewer iDevice', () => {
             // Upload STL model via file picker
             await uploadModelViaFilePicker(page, 'test/fixtures/ascii-cube.stl');
 
-            // Wait for the input to have the converted GLB file path
+            // Wait for the input to reflect the uploaded STL asset (no conversion)
             await page.waitForFunction(
                 () => {
                     const input = document.querySelector('#threeD3DModelFile') as HTMLInputElement;
-                    return input?.value?.startsWith('asset://') && input?.value?.endsWith('.glb');
+                    return input?.value?.startsWith('asset://') && input?.value?.endsWith('.stl');
                 },
                 { timeout: 30000 },
             );
 
-            // Verify the input has the converted GLB file path
+            // Verify the input keeps the STL asset path (rendered natively, no orphan GLB)
             const modelFileInput = page.locator('#threeD3DModelFile');
             const inputValue = await modelFileInput.inputValue();
             expect(inputValue).toBeTruthy();
             expect(inputValue.startsWith('asset://')).toBe(true);
-            expect(inputValue.endsWith('.glb')).toBe(true);
+            expect(inputValue.endsWith('.stl')).toBe(true);
         });
 
         test('should upload both GLB and STL models in sequence', async ({ authenticatedPage, createProject }) => {
@@ -260,24 +263,23 @@ test.describe('3D Viewer iDevice', () => {
             await add3DViewerIdevice(page);
             await uploadModelViaFilePicker(page, 'test/fixtures/ascii-cube.stl');
 
-            // Wait for converted GLB to be set
+            // STL stays as STL (rendered natively with Three.js, no conversion)
             await page.waitForFunction(
                 () => {
                     const inputs = document.querySelectorAll('#threeD3DModelFile');
                     const lastInput = inputs[inputs.length - 1] as HTMLInputElement;
-                    return lastInput?.value?.startsWith('asset://') && lastInput?.value?.endsWith('.glb');
+                    return lastInput?.value?.startsWith('asset://') && lastInput?.value?.endsWith('.stl');
                 },
                 { timeout: 30000 },
             );
 
-            // Verify converted GLB is set
             const stlValue = await page.evaluate(() => {
                 const inputs = document.querySelectorAll('#threeD3DModelFile');
                 const lastInput = inputs[inputs.length - 1] as HTMLInputElement;
                 return lastInput?.value || '';
             });
             expect(stlValue.startsWith('asset://')).toBe(true);
-            expect(stlValue.endsWith('.glb')).toBe(true);
+            expect(stlValue.endsWith('.stl')).toBe(true);
 
             // Save the second iDevice
             await save3DViewerIdevice(page);

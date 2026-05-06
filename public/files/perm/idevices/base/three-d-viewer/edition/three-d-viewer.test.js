@@ -132,7 +132,9 @@ describe('three-d-viewer iDevice (edition)', () => {
     });
 
     describe('getThreeJSBaseUrl', () => {
-        const expectedPath = 'files/perm/idevices/base/three-d-viewer/edition/';
+        // Shared Three.js libs live under export/ so editor and exported packages
+        // reuse a single copy (saves ~700KB of duplicated assets).
+        const expectedPath = 'files/perm/idevices/base/three-d-viewer/export/';
 
         it('returns absolute URL with protocol when baseURL is a full URL', () => {
             global.eXeLearning.symfony = {
@@ -390,12 +392,20 @@ describe('three-d-viewer iDevice (edition)', () => {
             expect($exeDevice.isSupportedModelFile('model.glb')).toBe(true);
         });
 
+        it('returns true for .gltf files', () => {
+            expect($exeDevice.isSupportedModelFile('model.gltf')).toBe(true);
+        });
+
         it('returns true for .stl files', () => {
             expect($exeDevice.isSupportedModelFile('model.stl')).toBe(true);
         });
 
         it('returns true for asset:// URLs with .glb', () => {
             expect($exeDevice.isSupportedModelFile('asset://uuid.glb')).toBe(true);
+        });
+
+        it('returns true for asset:// URLs with .gltf', () => {
+            expect($exeDevice.isSupportedModelFile('asset://uuid.gltf')).toBe(true);
         });
 
         it('returns true for asset:// URLs with .stl', () => {
@@ -418,6 +428,88 @@ describe('three-d-viewer iDevice (edition)', () => {
         it('returns false for null/undefined', () => {
             expect($exeDevice.isSupportedModelFile(null)).toBe(false);
             expect($exeDevice.isSupportedModelFile(undefined)).toBe(false);
+        });
+    });
+
+    describe('set3DViewerJSON / get3DViewerJSON', () => {
+        it('forces autoRotate=false when showNavControls is true (mutual exclusion)', () => {
+            $exeDevice.set3DViewerJSON({ showNavControls: true, autoRotate: true });
+            expect($exeDevice.state.showNavControls).toBe(true);
+            expect($exeDevice.state.autoRotate).toBe(false);
+        });
+
+        it('keeps autoRotate when showNavControls is false', () => {
+            $exeDevice.set3DViewerJSON({ showNavControls: false, autoRotate: true });
+            expect($exeDevice.state.autoRotate).toBe(true);
+        });
+
+        it('defaults showNavControls to false for new state', () => {
+            $exeDevice.set3DViewerJSON({});
+            expect($exeDevice.state.showNavControls).toBe(false);
+        });
+
+        it('reads showNavControls boolean from data', () => {
+            $exeDevice.set3DViewerJSON({ showNavControls: true });
+            expect($exeDevice.state.showNavControls).toBe(true);
+        });
+
+        it('get3DViewerJSON strips _previewBlobUrl (session-scoped, must not persist)', () => {
+            $exeDevice.set3DViewerJSON({});
+            $exeDevice.state._previewBlobUrl = 'blob:http://localhost/abc';
+            const json = $exeDevice.get3DViewerJSON();
+            expect(json._previewBlobUrl).toBeUndefined();
+            expect(json.src).toBe('');
+        });
+    });
+
+    describe('controls (fullscreen + nav)', () => {
+        it('exposes setupControls and nudgeCamera methods', () => {
+            expect(typeof $exeDevice.setupControls).toBe('function');
+            expect(typeof $exeDevice.nudgeCamera).toBe('function');
+        });
+
+        it('nudgeCamera is a no-op when no camera or model-viewer is available', () => {
+            $exeDevice.threeJSCamera = null;
+            $exeDevice.threeJSScene = null;
+            $exeDevice.modelViewer = null;
+            // Should not throw
+            expect(() => $exeDevice.nudgeCamera(0.1, 0)).not.toThrow();
+        });
+
+        it('nudgeCamera updates model-viewer cameraOrbit when no STL scene is active', () => {
+            $exeDevice.threeJSCamera = null;
+            $exeDevice.threeJSScene = null;
+            const orbits = [];
+            $exeDevice.modelViewer = {
+                getCameraOrbit: () => ({ theta: 0, phi: Math.PI / 2, radius: 1 }),
+                set cameraOrbit(v) { orbits.push(v); },
+                jumpCameraToGoal: () => {},
+            };
+            $exeDevice.nudgeCamera(0.1, 0);
+            expect(orbits.length).toBe(1);
+            expect(orbits[0]).toMatch(/^0\.1rad /);
+        });
+
+        it('nudgeCamera moves the STL camera position when a scene is active', () => {
+            const positions = [];
+            const camera = {
+                position: {
+                    x: 0, y: 0, z: 5,
+                    length: () => 5,
+                    set(x, y, z) { positions.push([x, y, z]); this.x = x; this.y = y; this.z = z; },
+                },
+                lookAt: () => {},
+            };
+            $exeDevice.threeJSCamera = camera;
+            $exeDevice.threeJSScene = {};
+            $exeDevice.threeJSControls = null;
+            $exeDevice.modelViewer = null;
+            $exeDevice.nudgeCamera(Math.PI / 2, 0);
+            expect(positions.length).toBe(1);
+            // After +PI/2 yaw from (0,0,5), camera should be roughly at (5,0,0)
+            const [x, , z] = positions[0];
+            expect(Math.abs(x - 5)).toBeLessThan(0.001);
+            expect(Math.abs(z)).toBeLessThan(0.001);
         });
     });
 

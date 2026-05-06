@@ -20,8 +20,51 @@
         'viewer.animation_paused': 'Animation paused',
         'viewer.animation_enabled': 'Animation enabled',
         'viewer.local_warning_title': '3D Viewer not available',
-        'viewer.local_warning_message': 'The 3D viewer requires a web server to work. Open this content from a web server or use eXeLearning preview.'
+        'viewer.local_warning_message': 'The 3D viewer requires a web server to work. Open this content from a web server or use eXeLearning preview.',
+        'viewer.fullscreen': 'Fullscreen',
+        'viewer.exit_fullscreen': 'Exit fullscreen',
+        'viewer.rotate_left': 'Rotate left',
+        'viewer.rotate_right': 'Rotate right',
+        'viewer.tilt_up': 'Tilt up',
+        'viewer.tilt_down': 'Tilt down'
     };
+
+    /** Camera nudge step (radians) — matches threesixty viewer feel */
+    const YAW_STEP = (15 * Math.PI) / 180;
+    const PITCH_STEP = (10 * Math.PI) / 180;
+
+    /**
+     * Build the toolbar markup (fullscreen button + 4-direction nav pad).
+     * Rendered once into the wrapper so it ships with the static export.
+     * Returns empty string when nav controls are not enabled in the config.
+     * @param {object} [cfg]
+     * @returns {string}
+     */
+    function buildControlsMarkup(cfg) {
+        if (!cfg?.showNavControls) return '';
+        const fs = translate('viewer.fullscreen');
+        const nav = [
+            ['left',  '←', translate('viewer.rotate_left')],
+            ['up',    '↑', translate('viewer.tilt_up')],
+            ['down',  '↓', translate('viewer.tilt_down')],
+            ['right', '→', translate('viewer.rotate_right')],
+        ];
+        const navBtns = nav
+            .map(([key, glyph, label]) =>
+                `<button type="button" class="three-d-viewer-nav-btn three-d-viewer-nav-${key}" data-nav="${key}" aria-label="${label}" title="${label}">${glyph}</button>`)
+            .join('');
+        return `
+            <button type="button" class="three-d-viewer-fullscreen-button" data-fullscreen aria-label="${fs}" title="${fs}">⛶</button>
+            <div class="three-d-viewer-nav" role="group" aria-label="${translate('viewer.rotate_left')}">${navBtns}</div>
+        `;
+    }
+
+    /**
+     * Clamp a value to [min, max].
+     */
+    function clamp(value, min, max) {
+        return Math.min(max, Math.max(min, value));
+    }
 
     /**
      * Simple i18n helper. Falls back to built-in translations if _() is not present.
@@ -303,14 +346,12 @@
             if (assetManager) {
                 if (typeof assetManager.resolveAssetURLSync === 'function') {
                     const blobUrl = assetManager.resolveAssetURLSync(clean);
-                    console.log('[3D Viewer] resolveRuntimeSrc asset://', clean, '-> blob:', blobUrl ? blobUrl.substring(0, 50) : 'null');
                     if (blobUrl) {
                         return blobUrl;
                     }
                 }
                 // If AssetManager can't resolve it yet, return empty to prevent 404
                 // The async resolution in applyConfig will handle it
-                console.log('[3D Viewer] Asset not resolved yet, will try async:', clean);
                 return '';
             }
 
@@ -591,16 +632,19 @@
         normalizeConfig(config = {}) {
             const anim = config.animation || {};
             const parsedSpeed = parseFloat(anim.speed);
+            const showNavControls = !!config.showNavControls;
 
             return {
                 src: normalizePath(config.src),
                 alt: config.alt || '',
                 backgroundColor: config.backgroundColor || DEFAULT_BACKGROUND,
                 cameraControls: config.cameraControls !== false,
-                autoRotate: config.autoRotate !== false,
+                // Mutually exclusive: nav controls override auto-rotate
+                autoRotate: !showNavControls && config.autoRotate !== false,
                 autoRotateSpeed: Number.isFinite(parseFloat(config.autoRotateSpeed))
                     ? parseFloat(config.autoRotateSpeed)
                     : 30,
+                showNavControls,
                 animation: {
                     enabled: !!anim.enabled,
                     name: anim.name || '',
@@ -626,6 +670,76 @@
                 this.applyConfig();
                 this.setupEvents();
             }
+
+            this.setupControls();
+        }
+
+        /**
+         * Wire fullscreen toggle and 4-direction nav buttons. Works for both
+         * STL (Three.js scene) and GLB/GLTF (model-viewer) modes.
+         */
+        setupControls() {
+            const fsBtn = this.wrapper.querySelector('[data-fullscreen]');
+            if (fsBtn) {
+                const isFs = () =>
+                    document.fullscreenElement === this.wrapper ||
+                    document.webkitFullscreenElement === this.wrapper;
+                const syncLabel = () => {
+                    const label = isFs() ? translate('viewer.exit_fullscreen') : translate('viewer.fullscreen');
+                    fsBtn.setAttribute('aria-label', label);
+                    fsBtn.setAttribute('title', label);
+                };
+                fsBtn.addEventListener('click', () => {
+                    if (isFs()) {
+                        (document.exitFullscreen || document.webkitExitFullscreen)?.call(document);
+                    } else {
+                        (this.wrapper.requestFullscreen || this.wrapper.webkitRequestFullscreen)?.call(this.wrapper);
+                    }
+                });
+                document.addEventListener('fullscreenchange', syncLabel);
+                document.addEventListener('webkitfullscreenchange', syncLabel);
+            }
+
+            // Arrow direction matches user expectation: pressing → makes the
+            // model appear to rotate right (camera orbits the opposite way).
+            this.wrapper.querySelectorAll('[data-nav]').forEach((btn) => {
+                const dir = btn.getAttribute('data-nav');
+                const dAz = dir === 'right' ? -YAW_STEP : dir === 'left' ? YAW_STEP : 0;
+                const dPo = dir === 'up' ? PITCH_STEP : dir === 'down' ? -PITCH_STEP : 0;
+                btn.addEventListener('click', () => this.nudgeCamera(dAz, dPo));
+            });
+        }
+
+        /**
+         * Orbit camera by (dAz, dPo) radians around the model. Dispatches to the
+         * STL three.js scene we control directly, or to model-viewer's
+         * cameraOrbit API for GLB/GLTF.
+         */
+        nudgeCamera(dAz, dPo) {
+            // STL path: we own the camera + OrbitControls.
+            if (this._threeJSCamera) {
+                const camera = this._threeJSCamera;
+                const controls = this._threeJSControls;
+                const r = camera.position.length() || 1;
+                let az = controls?.getAzimuthalAngle?.() ?? Math.atan2(camera.position.x, camera.position.z);
+                let po = controls?.getPolarAngle?.() ?? Math.acos(clamp((camera.position.y || 0) / r, -1, 1));
+                az += dAz;
+                po = clamp(po + dPo, 0.05, Math.PI - 0.05);
+                const sinPo = Math.sin(po);
+                camera.position.set(r * sinPo * Math.sin(az), r * Math.cos(po), r * sinPo * Math.cos(az));
+                camera.lookAt(0, 0, 0);
+                controls?.update?.();
+                return;
+            }
+            // GLB/GLTF path: drive model-viewer's camera orbit.
+            const mv = this.modelViewer;
+            if (mv && typeof mv.getCameraOrbit === 'function') {
+                const orbit = mv.getCameraOrbit();
+                const theta = (orbit.theta || 0) + dAz;
+                const phi = clamp((orbit.phi || Math.PI / 2) + dPo, 0.05, Math.PI - 0.05);
+                mv.cameraOrbit = `${theta}rad ${phi}rad ${orbit.radius || 'auto'}m`;
+                mv.jumpCameraToGoal?.();
+            }
         }
 
         /**
@@ -644,8 +758,6 @@
             const warningDiv = document.createElement('div');
             warningDiv.innerHTML = buildLocalWarningHTML();
             this.wrapper.appendChild(warningDiv.firstElementChild);
-
-            console.log('[3D Viewer] Running from file:// protocol - showing warning');
         }
 
         /**
@@ -770,16 +882,15 @@
                 };
                 animate();
 
-                // Store references for cleanup
+                // Store references for cleanup + camera nudge
                 this._threeJSRenderer = renderer;
                 this._threeJSControls = controls;
+                this._threeJSCamera = camera;
 
                 // Hide empty state
                 if (this.emptyState) {
                     this.emptyState.style.display = 'none';
                 }
-
-                console.log('[3D Viewer] STL rendered with Three.js');
 
             } catch (err) {
                 console.error('[3D Viewer] Failed to render STL:', err);
@@ -818,38 +929,19 @@
             if (!this.modelViewer) return;
             const cfg = this.config;
 
-            console.log('[3D Viewer] applyConfig called with src:', cfg.src);
-
             // First try synchronous resolution
             let viewerSrc = resolveRuntimeSrc(cfg.src, this.ideviceId);
 
             // If src is an asset:// URL and sync resolution returned empty, try async
             if (!viewerSrc && cfg.src && cfg.src.startsWith('asset://')) {
-                console.log('[3D Viewer] Attempting async resolution for:', cfg.src);
                 viewerSrc = await resolveAssetUrlAsync(cfg.src);
             }
 
-            // Verify blob content before setting src (debug)
-            if (viewerSrc && viewerSrc.startsWith('blob:')) {
-                try {
-                    const resp = await fetch(viewerSrc);
-                    const buf = await resp.arrayBuffer();
-                    const view = new DataView(buf);
-                    const magic = view.getUint32(0, true);
-                    const isGLB = magic === 0x46546C67; // 'glTF'
-                    const firstChars = new TextDecoder().decode(buf.slice(0, 20));
-                    console.log('[3D Viewer] Blob content check - isGLB:', isGLB, 'magic:', magic.toString(16), 'first chars:', firstChars, 'size:', buf.byteLength);
-                    if (!isGLB) {
-                        console.error('[3D Viewer] WARNING: Blob does not contain valid GLB data!');
-                    }
-                } catch (e) {
-                    console.error('[3D Viewer] Failed to verify blob content:', e);
-                }
-            }
-
-            console.log('[3D Viewer] Setting model-viewer src to:', viewerSrc);
             if (viewerSrc) {
                 this.modelViewer.src = viewerSrc;
+                // model-viewer's property doesn't always reflect to the
+                // attribute reliably (custom-element timing), so set both.
+                this.modelViewer.setAttribute('src', viewerSrc);
             }
 
             const alt = cfg.alt || '';
@@ -991,29 +1083,26 @@
         renderView: function (data, accessibility, template) {
             data = data || {};
 
-            // Debug: log incoming data
-            console.log('[3D Viewer] renderView data:', data);
-
             const viewerId = data.ideviceId || `three-d-viewer-${Date.now()}`;
             const anim = data.animation || {};
+            const showNavControls = !!data.showNavControls;
             const cfg = {
                 src: normalizePath(data.src),
                 alt: data.alt || '',
                 backgroundColor: data.backgroundColor || DEFAULT_BACKGROUND,
                 cameraControls: data.cameraControls !== false,
-                autoRotate: data.autoRotate !== false,
+                // Mutually exclusive: nav controls override auto-rotate
+                autoRotate: !showNavControls && data.autoRotate !== false,
                 autoRotateSpeed: Number.isFinite(parseFloat(data.autoRotateSpeed))
                     ? parseFloat(data.autoRotateSpeed)
                     : 30,
+                showNavControls,
                 animation: {
                     enabled: !!anim.enabled,
                     name: anim.name || '',
                     speed: Number.isFinite(parseFloat(anim.speed)) ? parseFloat(anim.speed) : 1
                 }
             };
-
-            // Debug: log config
-            console.log('[3D Viewer] renderView cfg:', cfg);
 
             // Preload the ES module for faster first paint
             appendModulePreloadOnce(getModelViewerLibUrl());
@@ -1028,6 +1117,7 @@
                     ${buildModelMarkup(cfg, viewerId)}
                     <span class="sr-only" data-live aria-live="polite"></span>
                     <div class="viewer-empty" data-empty>${translate('viewer.empty_state')}</div>
+                    ${buildControlsMarkup(cfg)}
                 </div>
             `;
             return template.replace('{content}', content);

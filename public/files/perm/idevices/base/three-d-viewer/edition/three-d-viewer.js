@@ -8,12 +8,19 @@ var $exeDevice = (function () {
         cameraControls: true,
         autoRotate: true,
         autoRotateSpeed: 30,
+        showNavControls: false,
         animation: { enabled: false, name: '', speed: 1 },
     });
 
-    const MODEL_EXTENSIONS = ['.glb', '.stl'];
+    const MODEL_EXTENSIONS = ['.glb', '.gltf', '.stl'];
 
-    const cloneState = () => JSON.parse(JSON.stringify(DEFAULT_STATE));
+    /** Camera nudge step (radians) — matches threesixty viewer feel */
+    const YAW_STEP = (15 * Math.PI) / 180;
+    const PITCH_STEP = (10 * Math.PI) / 180;
+
+    const cloneState = () => structuredClone(DEFAULT_STATE);
+
+    const clampNum = (value, min, max) => Math.min(max, Math.max(min, value));
 
     return {
         name: _('3D Viewer'),
@@ -39,9 +46,6 @@ var $exeDevice = (function () {
         ariaLive: null,
         formElements: {},
         animationRow: null,
-        modelFiles: [],
-        isLoadingModels: false,
-        modelViewerLibPromise: null,
         lastPreviewSrc: '',
         previewRetryCount: 0,
         state: cloneState(),
@@ -61,6 +65,73 @@ var $exeDevice = (function () {
 
             this.updatePreview();
             this.registerBehaviours();
+            this.setupControls();
+        },
+
+        /**
+         * Wire fullscreen toggle and 4-direction nav buttons. Targets the
+         * preview container so the controls remain visible in fullscreen.
+         */
+        setupControls: function () {
+            const target = this.previewContainer?.parentElement || this.previewContainer;
+            const fsBtn = this.previewContainer?.querySelector('[data-fullscreen]');
+            if (target && fsBtn) {
+                const isFs = () =>
+                    document.fullscreenElement === target ||
+                    document.webkitFullscreenElement === target;
+                fsBtn.addEventListener('click', () => {
+                    if (isFs()) {
+                        (document.exitFullscreen || document.webkitExitFullscreen)?.call(document);
+                    } else {
+                        (target.requestFullscreen || target.webkitRequestFullscreen)?.call(target);
+                    }
+                });
+                const sync = () => {
+                    const label = isFs() ? _('Exit fullscreen') : _('Fullscreen');
+                    fsBtn.setAttribute('aria-label', label);
+                    fsBtn.setAttribute('title', label);
+                };
+                document.addEventListener('fullscreenchange', sync);
+                document.addEventListener('webkitfullscreenchange', sync);
+            }
+
+            // Arrow direction matches user expectation: pressing → makes the
+            // model appear to rotate right (camera orbits the opposite way).
+            this.previewContainer?.querySelectorAll('[data-nav]').forEach((btn) => {
+                const dir = btn.getAttribute('data-nav');
+                const dAz = dir === 'right' ? -YAW_STEP : dir === 'left' ? YAW_STEP : 0;
+                const dPo = dir === 'up' ? PITCH_STEP : dir === 'down' ? -PITCH_STEP : 0;
+                btn.addEventListener('click', () => this.nudgeCamera(dAz, dPo));
+            });
+        },
+
+        /**
+         * Orbit camera by (dAz, dPo) radians around the model.
+         * STL path uses our own three.js scene; GLB/GLTF uses model-viewer.
+         */
+        nudgeCamera: function (dAz, dPo) {
+            if (this.threeJSCamera && this.threeJSScene) {
+                const camera = this.threeJSCamera;
+                const controls = this.threeJSControls;
+                const r = camera.position.length() || 1;
+                let az = controls?.getAzimuthalAngle?.() ?? Math.atan2(camera.position.x, camera.position.z);
+                let po = controls?.getPolarAngle?.() ?? Math.acos(clampNum((camera.position.y || 0) / r, -1, 1));
+                az += dAz;
+                po = clampNum(po + dPo, 0.05, Math.PI - 0.05);
+                const sinPo = Math.sin(po);
+                camera.position.set(r * sinPo * Math.sin(az), r * Math.cos(po), r * sinPo * Math.cos(az));
+                camera.lookAt(0, 0, 0);
+                controls?.update?.();
+                return;
+            }
+            const mv = this.modelViewer;
+            if (mv && typeof mv.getCameraOrbit === 'function') {
+                const orbit = mv.getCameraOrbit();
+                const theta = (orbit.theta || 0) + dAz;
+                const phi = clampNum((orbit.phi || Math.PI / 2) + dPo, 0.05, Math.PI - 0.05);
+                mv.cameraOrbit = `${theta}rad ${phi}rad ${orbit.radius || 'auto'}m`;
+                mv.jumpCameraToGoal?.();
+            }
         },
 
         /**
@@ -71,24 +142,17 @@ var $exeDevice = (function () {
             if (!assetManager) return;
 
             try {
-                // First check if already in cache
                 const cached = assetManager.resolveAssetURLSync(assetUrl);
                 if (cached) {
-                    console.log('[3D Viewer] Asset already cached:', assetUrl);
                     this.state._previewBlobUrl = cached;
                     return;
                 }
-
-                // Load from IndexedDB
-                console.log('[3D Viewer] Pre-loading asset into cache:', assetUrl);
                 const blobUrl = await assetManager.resolveAssetURL(assetUrl);
                 if (blobUrl) {
                     this.state._previewBlobUrl = blobUrl;
-                    // Also update the form element data attribute for consistency
                     if (this.formElements.src) {
                         this.formElements.src.dataset.blobUrl = blobUrl;
                     }
-                    console.log('[3D Viewer] Asset pre-loaded:', assetUrl, '->', blobUrl.substring(0, 50));
                 }
             } catch (err) {
                 console.error('[3D Viewer] Failed to pre-load asset:', assetUrl, err);
@@ -102,71 +166,6 @@ var $exeDevice = (function () {
             if (!path) return false;
             const filename = path.split('/').pop() || '';
             return filename.toLowerCase().endsWith('.stl');
-        },
-
-        /**
-         * Auto-convert STL to GLB when loading an existing iDevice with STL source
-         */
-        autoConvertSTLOnLoad: async function () {
-            const assetUrl = this.state.src;
-            console.log('[3D Viewer] Auto-converting STL on load:', assetUrl);
-
-            // Get blob URL from AssetManager
-            const assetManager = this.getAssetManager();
-            if (!assetManager) {
-                console.warn('[3D Viewer] No AssetManager available for STL conversion');
-                this.updatePreview();
-                return;
-            }
-
-            let blobUrl = assetManager.resolveAssetURLSync(assetUrl);
-            if (!blobUrl) {
-                // Asset might not be loaded yet - wait for it
-                console.log('[3D Viewer] Waiting for STL asset to load...');
-                try {
-                    blobUrl = await assetManager.resolveAssetURL(assetUrl);
-                } catch (err) {
-                    console.warn('[3D Viewer] Failed to load STL asset:', err);
-                    this.updatePreview();
-                    return;
-                }
-            }
-
-            if (!blobUrl) {
-                console.warn('[3D Viewer] No blob URL for STL asset');
-                this.updatePreview();
-                return;
-            }
-
-            this.showConversionProgress();
-            try {
-                // Convert STL to GLB
-                const glbBlob = await this.convertSTLToGLB(blobUrl);
-
-                // Register converted GLB as a new asset
-                const filename = assetUrl.split('/').pop() || 'model.stl';
-                const glbFilename = filename.replace(/\.stl$/i, '.glb');
-                const glbFile = new File([glbBlob], glbFilename, { type: 'model/gltf-binary' });
-
-                const glbAssetUrl = await assetManager.insertImage(glbFile);
-                console.log('[3D Viewer] Converted STL to GLB asset:', glbAssetUrl);
-
-                // Update state and form with the new GLB URL
-                this.state.src = glbAssetUrl;
-                this.state._previewBlobUrl = assetManager.resolveAssetURLSync(glbAssetUrl);
-
-                if (this.formElements.src) {
-                    this.formElements.src.value = glbAssetUrl;
-                    this.formElements.src.dataset.blobUrl = this.state._previewBlobUrl;
-                }
-
-                this.updatePreview();
-            } catch (error) {
-                console.error('[3D Viewer] Auto-conversion of STL failed:', error);
-                this.updatePreview();
-            } finally {
-                this.hideConversionProgress();
-            }
         },
 
         renderEditor: function () {
@@ -186,13 +185,20 @@ var $exeDevice = (function () {
                                         <span>${_('Select a 3D model to preview')}</span>
                                     </div>
                                 </div>
+                                <button type="button" class="three-d-viewer-fullscreen-button" data-fullscreen aria-label="${_('Fullscreen')}" title="${_('Fullscreen')}">⛶</button>
+                                <div class="three-d-viewer-nav" role="group" aria-label="${_('Rotate model')}">
+                                    <button type="button" class="three-d-viewer-nav-btn three-d-viewer-nav-left" data-nav="left" aria-label="${_('Rotate left')}" title="${_('Rotate left')}">←</button>
+                                    <button type="button" class="three-d-viewer-nav-btn three-d-viewer-nav-up" data-nav="up" aria-label="${_('Tilt up')}" title="${_('Tilt up')}">↑</button>
+                                    <button type="button" class="three-d-viewer-nav-btn three-d-viewer-nav-down" data-nav="down" aria-label="${_('Tilt down')}" title="${_('Tilt down')}">↓</button>
+                                    <button type="button" class="three-d-viewer-nav-btn three-d-viewer-nav-right" data-nav="right" aria-label="${_('Rotate right')}" title="${_('Rotate right')}">→</button>
+                                </div>
                             </div>
                         </div>
 
                         <!-- Model file selector -->
                         <div class="d-flex align-items-center mb-3">
                             <label for="threeD3DModelFile" class="form-label me-2 mb-0 text-nowrap">${_('3D Model')}:</label>
-                            <input type="text" class="exe-file-picker form-control" id="threeD3DModelFile" readonly placeholder="${_('Select a GLB or STL file')}" />
+                            <input type="text" class="exe-file-picker form-control" id="threeD3DModelFile" readonly placeholder="${_('Select a GLB, GLTF or STL file')}" />
                         </div>
                         <p class="form-text text-muted mb-4">${_('Supported formats')}: GLB, GLTF, STL</p>
 
@@ -240,6 +246,17 @@ var $exeDevice = (function () {
                                     </div>
                                 </div>
                             </div>
+
+                            <div class="d-flex align-items-center gap-2 flex-nowrap mb-1">
+                                <div class="toggle-item">
+                                    <span class="toggle-control">
+                                        <input type="checkbox" id="threeDShowNavControls" class="toggle-input" />
+                                        <span class="toggle-visual"></span>
+                                    </span>
+                                    <label for="threeDShowNavControls" class="toggle-label">${_('Show navigation controls (fullscreen + arrows)')}</label>
+                                </div>
+                            </div>
+                            <p class="form-text text-muted">${_('Mutually exclusive with auto-rotate.')}</p>
                         </fieldset>
 
                         <!-- Animation options (shown when model has animations) -->
@@ -288,6 +305,7 @@ var $exeDevice = (function () {
                 cameraControls: this.ideviceBody.querySelector('#threeDCameraControls'),
                 autoRotate: this.ideviceBody.querySelector('#threeDAutoRotate'),
                 autoRotateSpeed: this.ideviceBody.querySelector('#threeDAutoRotateSpeed'),
+                showNavControls: this.ideviceBody.querySelector('#threeDShowNavControls'),
                 animationToggle: this.ideviceBody.querySelector('#threeDAnimationToggle'),
                 animationName: this.ideviceBody.querySelector('#threeDAnimationName'),
                 animationSpeed: this.ideviceBody.querySelector('#threeDAnimationSpeed'),
@@ -306,6 +324,9 @@ var $exeDevice = (function () {
                 if (!Number.isNaN(autoRotateSpeed)) {
                     merged.autoRotateSpeed = autoRotateSpeed;
                 }
+                merged.showNavControls = typeof data.showNavControls === 'boolean' ? data.showNavControls : merged.showNavControls;
+                // Mutually exclusive: nav controls override auto-rotate
+                if (merged.showNavControls) merged.autoRotate = false;
                 if (data.animation && typeof data.animation === 'object') {
                     merged.animation.enabled = !!data.animation.enabled;
                     merged.animation.name = data.animation.name || '';
@@ -321,7 +342,9 @@ var $exeDevice = (function () {
         },
 
         get3DViewerJSON: function () {
-            return JSON.parse(JSON.stringify(this.state));
+            const clone = structuredClone(this.state);
+            delete clone._previewBlobUrl;
+            return clone;
         },
 
         applyStateToForm: function () {
@@ -332,10 +355,13 @@ var $exeDevice = (function () {
             this.formElements.cameraControls.checked = !!s.cameraControls;
             this.formElements.autoRotate.checked = !!s.autoRotate;
             this.formElements.autoRotateSpeed.value = s.autoRotateSpeed || 30;
+            this.formElements.showNavControls.checked = !!s.showNavControls;
             this.formElements.animationToggle.checked = !!s.animation.enabled;
             this.formElements.animationSpeed.value = s.animation.speed || 1;
             this.formElements.animationName.value = s.animation.name || '';
             this.updateAutoRotateSpeedState();
+            this.updateNavControlsVisibility();
+            this.toggleEmptyState();
             if (this.animationRow) {
                 this.toggleAnimationRow(false);
             }
@@ -348,13 +374,16 @@ var $exeDevice = (function () {
             const backgroundColor = this.formElements.backgroundColor.value || '#f5f5f5';
             // Preserve _previewBlobUrl across state updates
             const previewBlobUrl = this.state._previewBlobUrl;
+            const showNavControls = !!this.formElements.showNavControls?.checked;
             this.state = {
                 src: this.resolveModelPath(this.formElements.src.value.trim()),
                 alt: this.formElements.alt.value.trim(),
                 backgroundColor,
                 cameraControls: !!this.formElements.cameraControls.checked,
-                autoRotate: !!this.formElements.autoRotate.checked,
+                // Mutually exclusive: nav controls override auto-rotate
+                autoRotate: !showNavControls && !!this.formElements.autoRotate.checked,
                 autoRotateSpeed: parseFloat(this.formElements.autoRotateSpeed.value) || 30,
+                showNavControls,
                 animation: {
                     enabled: !!this.formElements.animationToggle.checked,
                     name: this.formElements.animationName.value || '',
@@ -374,9 +403,13 @@ var $exeDevice = (function () {
                 this.updatePreview();
             };
 
+            // Generic change listener for everything except src and the
+            // mutually-exclusive autoRotate / showNavControls toggles. Those
+            // are handled by a dedicated listener below so we can flip the
+            // sibling checkbox BEFORE readFormState runs — otherwise the
+            // generic onChange would observe stale form values.
             Object.entries(this.formElements).forEach(([key, element]) => {
-                if (!element || key === 'src') {
-                    // Skip src - we handle it separately for STL conversion
+                if (!element || key === 'src' || key === 'autoRotate' || key === 'showNavControls') {
                     return;
                 }
                 const events = new Set(['change']);
@@ -391,7 +424,20 @@ var $exeDevice = (function () {
                 this.formElements.src.addEventListener('change', () => this.handleModelSelection());
             }
 
-            this.formElements.autoRotate.addEventListener('change', () => this.updateAutoRotateSpeedState());
+            const handleBehaviorChange = (winner) => {
+                if (winner === 'autoRotate' && this.formElements.autoRotate.checked) {
+                    if (this.formElements.showNavControls) this.formElements.showNavControls.checked = false;
+                } else if (winner === 'showNavControls' && this.formElements.showNavControls?.checked) {
+                    this.formElements.autoRotate.checked = false;
+                }
+                this.readFormState();
+                this.updatePreview();
+                this.updateAutoRotateSpeedState();
+                this.updateNavControlsVisibility();
+            };
+
+            this.formElements.autoRotate.addEventListener('change', () => handleBehaviorChange('autoRotate'));
+            this.formElements.showNavControls?.addEventListener('change', () => handleBehaviorChange('showNavControls'));
         },
 
         updateAutoRotateSpeedState: function () {
@@ -402,6 +448,18 @@ var $exeDevice = (function () {
             if (speedRow) {
                 speedRow.style.display = enabled ? '' : 'none';
             }
+        },
+
+        /**
+         * Toggle visibility of fullscreen + nav buttons in the editor preview
+         * based on the showNavControls state.
+         */
+        updateNavControlsVisibility: function () {
+            const visible = !!this.state?.showNavControls;
+            const fs = this.previewContainer?.querySelector('[data-fullscreen]');
+            const nav = this.previewContainer?.querySelector('.three-d-viewer-nav');
+            if (fs) fs.style.display = visible ? '' : 'none';
+            if (nav) nav.style.display = visible ? '' : 'none';
         },
 
         createModelViewer: async function () {
@@ -453,6 +511,9 @@ var $exeDevice = (function () {
             if (viewerSrc && (force || viewerSrc !== this.lastPreviewSrc || !this.modelViewer.src)) {
                 this.lastPreviewSrc = viewerSrc;
                 this.modelViewer.src = viewerSrc;
+                // model-viewer's property doesn't always reflect to the
+                // attribute reliably (custom-element timing), so set both.
+                this.modelViewer.setAttribute('src', viewerSrc);
             }
             this.modelViewer.alt = state.alt || '';
             if (state.alt) {
@@ -486,8 +547,6 @@ var $exeDevice = (function () {
 
             // If no blob URL, try async resolution for asset:// URLs
             if (!blobUrl && state.src && state.src.startsWith('asset://')) {
-                console.log('[3D Viewer] STL: No blob URL yet, trying async resolution...');
-
                 // Wait for AssetManager to be available (may take a moment after page re-edit)
                 const assetManager = await this.waitForAssetManager(5000);
                 if (assetManager) {
@@ -498,7 +557,6 @@ var $exeDevice = (function () {
                             if (this.formElements.src) {
                                 this.formElements.src.dataset.blobUrl = blobUrl;
                             }
-                            console.log('[3D Viewer] STL: Async resolution succeeded:', blobUrl.substring(0, 50));
                         }
                     } catch (err) {
                         console.error('[3D Viewer] STL: Async resolution failed:', err);
@@ -542,13 +600,7 @@ var $exeDevice = (function () {
             const width = this.previewContainer.clientWidth || 400;
             const height = this.previewContainer.clientHeight || 300;
 
-            // Clean up previous renderer
-            if (this.threeJSRenderer) {
-                this.threeJSRenderer.dispose();
-                if (this.threeJSAnimationId) {
-                    cancelAnimationFrame(this.threeJSAnimationId);
-                }
-            }
+            this.disposeThreeJSScene();
 
             // Create scene
             const scene = new THREE.Scene();
@@ -640,14 +692,37 @@ var $exeDevice = (function () {
                 this.threeJSCamera = camera;
                 this.threeJSControls = controls;
                 this.threeJSMesh = mesh;
+                this.threeJSGeometry = geometry;
+                this.threeJSMaterial = material;
 
                 this.toggleEmptyState();
-                console.log('[3D Viewer] STL rendered with Three.js');
 
             } catch (err) {
                 console.error('[3D Viewer] Failed to render STL:', err);
                 this.toggleEmptyState();
             }
+        },
+
+        /**
+         * Dispose Three.js resources held by the editor preview to avoid
+         * leaking GPU buffers across successive STL re-renders.
+         */
+        disposeThreeJSScene: function () {
+            if (this.threeJSAnimationId) {
+                cancelAnimationFrame(this.threeJSAnimationId);
+                this.threeJSAnimationId = null;
+            }
+            this.threeJSGeometry?.dispose?.();
+            this.threeJSMaterial?.dispose?.();
+            this.threeJSControls?.dispose?.();
+            this.threeJSRenderer?.dispose?.();
+            this.threeJSGeometry = null;
+            this.threeJSMaterial = null;
+            this.threeJSControls = null;
+            this.threeJSRenderer = null;
+            this.threeJSMesh = null;
+            this.threeJSScene = null;
+            this.threeJSCamera = null;
         },
 
         /**
@@ -741,29 +816,23 @@ var $exeDevice = (function () {
             return this.get3DViewerJSON();
         },
 
-        get3DViewerJSON: function () {
-            return JSON.parse(JSON.stringify(this.state));
-        },
-
         /**
-         * Handle model selection from file picker
-         * Supports both GLB (direct) and STL (conversion to GLB)
+         * Handle model selection from file picker.
+         * Same path for GLB/GLTF and STL: store the asset URL as-is and let
+         * updatePreview pick the right renderer (model-viewer for GLB/GLTF,
+         * Three.js scene for STL). No upfront STL→GLB conversion — it would
+         * create an orphan duplicate file in the asset library.
          */
         handleModelSelection: async function () {
             const assetUrl = this.formElements.src.value;
             let blobUrl = this.formElements.src.dataset.blobUrl;
-
             if (!assetUrl) return;
 
-            // If no blob URL in data attribute, try AssetManager
             if (!blobUrl && assetUrl.startsWith('asset://')) {
                 const assetManager = this.getAssetManager();
                 if (assetManager) {
-                    // Try sync first
                     blobUrl = assetManager.resolveAssetURLSync(assetUrl);
-                    // If not in cache, load async
                     if (!blobUrl) {
-                        console.log('[3D Viewer] Loading asset async in handleModelSelection:', assetUrl);
                         try {
                             blobUrl = await assetManager.resolveAssetURL(assetUrl);
                         } catch (err) {
@@ -773,199 +842,50 @@ var $exeDevice = (function () {
                 }
             }
 
-            const filename = assetUrl.split('/').pop() || '';
-            const ext = filename.split('.').pop()?.toLowerCase();
-
-            if (ext === 'stl') {
-                // STL files need conversion to GLB for model-viewer
-                if (!blobUrl) {
-                    console.warn('[3D Viewer] No blob URL for STL conversion');
-                    return;
-                }
-
-                this.showConversionProgress();
-                try {
-                    // Convert STL to GLB
-                    const glbBlob = await this.convertSTLToGLB(blobUrl);
-
-                    // Register converted GLB as a new asset
-                    const assetManager = this.getAssetManager();
-                    if (assetManager) {
-                        // Create a File object from the blob
-                        const glbFilename = filename.replace(/\.stl$/i, '.glb');
-                        const glbFile = new File([glbBlob], glbFilename, { type: 'model/gltf-binary' });
-
-                        // Verify the GLB file content before storing
-                        const glbArrayBuffer = await glbFile.arrayBuffer();
-                        const glbView = new DataView(glbArrayBuffer);
-                        const magic = glbView.getUint32(0, true);
-                        if (magic !== 0x46546C67) {
-                            console.error('[3D Viewer] GLB file has wrong magic bytes before storage:', magic.toString(16));
-                        } else {
-                            console.log('[3D Viewer] GLB file verified before storage, size:', glbArrayBuffer.byteLength);
-                        }
-
-                        // Register as asset - this returns asset://uuid.glb
-                        const glbAssetUrl = await assetManager.insertImage(glbFile);
-                        console.log('[3D Viewer] Converted STL registered as GLB asset:', glbAssetUrl);
-
-                        // Use the converted GLB URL as the source
-                        this.state.src = glbAssetUrl;
-                        this.state._previewBlobUrl = assetManager.resolveAssetURLSync(glbAssetUrl);
-
-                        // Verify the stored blob is correct
-                        if (this.state._previewBlobUrl) {
-                            fetch(this.state._previewBlobUrl).then(resp => resp.arrayBuffer()).then(buf => {
-                                const view = new DataView(buf);
-                                const storedMagic = view.getUint32(0, true);
-                                if (storedMagic !== 0x46546C67) {
-                                    console.error('[3D Viewer] STORED blob has wrong magic bytes:', storedMagic.toString(16), 'First bytes:', new Uint8Array(buf.slice(0, 20)));
-                                } else {
-                                    console.log('[3D Viewer] STORED blob verified, size:', buf.byteLength);
-                                }
-                            }).catch(err => console.error('[3D Viewer] Failed to verify stored blob:', err));
-                        }
-
-                        // Update the file picker input to show the GLB
-                        if (this.formElements.src) {
-                            this.formElements.src.value = glbAssetUrl;
-                            this.formElements.src.dataset.blobUrl = this.state._previewBlobUrl;
-                        }
-                    } else {
-                        // Fallback: just use blob URL for preview (won't work in export)
-                        const glbBlobUrl = URL.createObjectURL(glbBlob);
-                        this.state.src = assetUrl;
-                        this.state._previewBlobUrl = glbBlobUrl;
-                    }
-
-                    this.readFormState();
-                    this.updatePreview();
-                } catch (error) {
-                    console.error('[3D Viewer] STL conversion failed:', error);
-                } finally {
-                    this.hideConversionProgress();
-                }
-            } else {
-                // GLB/GLTF - use directly
-                this.state.src = assetUrl;
-                this.state._previewBlobUrl = blobUrl;
-                this.readFormState();
-                this.updatePreview();
-            }
+            this.state.src = assetUrl;
+            this.state._previewBlobUrl = blobUrl;
+            this.readFormState();
+            this.updatePreview();
         },
 
         /**
-         * Convert STL file to GLB format using Three.js
-         * @param {string} blobUrl - The blob URL of the STL file
-         * @returns {Promise<Blob>} - The converted GLB as a Blob
-         */
-        convertSTLToGLB: async function (blobUrl) {
-            await this.ensureThreeJSLoaded();
-
-            const response = await fetch(blobUrl);
-            const arrayBuffer = await response.arrayBuffer();
-
-            const loader = new window.THREE.STLLoader();
-            const geometry = loader.parse(arrayBuffer);
-            geometry.center();
-            if (!geometry.hasAttribute('normal')) {
-                geometry.computeVertexNormals();
-            }
-
-            const material = new window.THREE.MeshStandardMaterial({
-                color: 0x808080,
-                metalness: 0.2,
-                roughness: 0.6,
-            });
-
-            const mesh = new window.THREE.Mesh(geometry, material);
-            const scene = new window.THREE.Scene();
-            scene.add(mesh);
-
-            const exporter = new window.THREE.GLTFExporter();
-            return new Promise((resolve, reject) => {
-                exporter.parse(
-                    scene,
-                    (glb) => {
-                        // Validate that we got binary GLB data
-                        if (!(glb instanceof ArrayBuffer)) {
-                            console.error('[3D Viewer] GLTFExporter did not return ArrayBuffer:', typeof glb);
-                            reject(new Error('GLTFExporter returned invalid data type'));
-                            return;
-                        }
-                        // Check GLB magic bytes (glTF = 0x46546C67)
-                        const view = new DataView(glb);
-                        const magic = view.getUint32(0, true);
-                        if (magic !== 0x46546C67) {
-                            console.error('[3D Viewer] Invalid GLB magic bytes:', magic.toString(16));
-                            reject(new Error('Invalid GLB format'));
-                            return;
-                        }
-                        console.log('[3D Viewer] GLB conversion successful, size:', glb.byteLength);
-                        const blob = new Blob([glb], { type: 'model/gltf-binary' });
-                        resolve(blob);
-                    },
-                    (error) => {
-                        console.error('[3D Viewer] GLTFExporter error:', error);
-                        reject(error);
-                    },
-                    { binary: true },
-                );
-            });
-        },
-
-        /**
-         * Load Three.js modules for STL conversion
+         * Load Three.js modules for native STL rendering. Three core, STLLoader
+         * and OrbitControls live under `export/` because they are also bundled
+         * into HTML/SCORM/EPUB exports — single copy avoids drift and ~700 KB
+         * of duplicate assets.
          */
         ensureThreeJSLoaded: async function () {
-            if (window.THREE?.STLLoader && window.THREE?.GLTFExporter && window.THREE?.OrbitControls) {
+            if (window.THREE?.STLLoader && window.THREE?.OrbitControls) {
                 return;
             }
             if (this._threeLoadPromise) {
                 return this._threeLoadPromise;
             }
 
-            // Use absolute URL with protocol to avoid path duplication in dynamic imports
-            const basePath = this.getThreeJSBaseUrl();
+            const sharedBase = this.getThreeJSBaseUrl();
 
             this._threeLoadPromise = (async () => {
-                const THREE = await import(basePath + 'three.module.min.js');
-                const { STLLoader } = await import(basePath + 'STLLoader.js');
-                const { GLTFExporter } = await import(basePath + 'GLTFExporter.js');
-                const { OrbitControls } = await import(basePath + 'OrbitControls.js');
+                const THREE = await import(sharedBase + 'three.module.min.js');
+                const { STLLoader } = await import(sharedBase + 'STLLoader.js');
+                const { OrbitControls } = await import(sharedBase + 'OrbitControls.js');
 
                 window.THREE = window.THREE || {};
                 Object.assign(window.THREE, THREE);
                 window.THREE.STLLoader = STLLoader;
-                window.THREE.GLTFExporter = GLTFExporter;
                 window.THREE.OrbitControls = OrbitControls;
             })();
 
             return this._threeLoadPromise;
         },
 
-        showConversionProgress: function () {
-            const empty = this.previewContainer?.querySelector('[data-empty-state]');
-            if (empty) {
-                const content = empty.querySelector('.viewer-empty-content');
-                if (content) {
-                    content.querySelector('span').textContent = _('Converting STL file...');
-                } else {
-                    empty.textContent = _('Converting STL file...');
-                }
-                empty.style.display = 'grid';
-            }
-        },
-
-        hideConversionProgress: function () {
-            this.toggleEmptyState();
-        },
-
         toggleEmptyState: function () {
-            const empty = this.previewContainer.querySelector('[data-empty-state]');
+            const empty = this.previewContainer?.querySelector('[data-empty-state]');
             if (!empty) return;
-            const hasModel = !!(this.state.src || this.modelViewer?.currentSrc || this.modelViewer?.src);
-            empty.style.display = hasModel ? 'none' : 'grid';
+            // Single source of truth: state.src. Don't trust modelViewer.src
+            // because the custom-element property may report stale or
+            // unexpected values (e.g. resolved page URL) before a real
+            // model is loaded.
+            empty.style.display = this.state?.src ? 'none' : 'grid';
         },
 
         announce: function (message) {
@@ -1070,7 +990,6 @@ var $exeDevice = (function () {
 
                     // If not in cache, trigger async load and return empty for now
                     // The model will be loaded when resolveAssetAndUpdate is called
-                    console.log('[3D Viewer] Asset not in cache, triggering async load:', relativePath);
                     this.resolveAssetAndUpdate(relativePath);
                     return ''; // Return empty - model-viewer will show empty state until loaded
                 }
@@ -1121,7 +1040,6 @@ var $exeDevice = (function () {
             try {
                 const blobUrl = await assetManager.resolveAssetURL(assetUrl);
                 if (blobUrl) {
-                    console.log('[3D Viewer] Asset resolved:', assetUrl, '->', blobUrl.substring(0, 50));
                     this.state._previewBlobUrl = blobUrl;
                     this.updatePreview(true); // Force update with new blob URL
                 }
@@ -1209,10 +1127,12 @@ var $exeDevice = (function () {
          * or empty. We must ensure the final URL has a protocol for dynamic imports
          * to work correctly regardless of how the main script was loaded.
          *
-         * @returns {string} Absolute URL ending with trailing slash (e.g., 'https://example.com/files/perm/.../edition/')
+         * @returns {string} Absolute URL ending with trailing slash (e.g., 'https://example.com/files/perm/.../export/')
          */
         getThreeJSBaseUrl: function () {
-            const relativePath = 'files/perm/idevices/base/three-d-viewer/edition/';
+            // Shared libs (three core / STLLoader / OrbitControls) live under
+            // export/ so editor and exported packages reuse the same copy.
+            const relativePath = 'files/perm/idevices/base/three-d-viewer/export/';
 
             // In static mode, use origin + path without basePath to avoid duplication
             // Static deployments serve files from the deploy root, and basePath is already

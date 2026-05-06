@@ -225,6 +225,38 @@ describe('three-d-viewer iDevice (export)', () => {
             expect(html).toContain('three-d-viewer-wrapper');
         });
 
+        it('omits fullscreen + nav controls when showNavControls is false (default)', () => {
+            const html = $threedviewer.renderView({ src: 'model.glb' }, {}, '{content}');
+
+            expect(html).not.toContain('three-d-viewer-fullscreen-button');
+            expect(html).not.toContain('data-nav="left"');
+        });
+
+        it('renders fullscreen + 4-direction nav pad when showNavControls is true', () => {
+            const html = $threedviewer.renderView(
+                { src: 'model.glb', showNavControls: true },
+                {},
+                '{content}',
+            );
+
+            expect(html).toContain('three-d-viewer-fullscreen-button');
+            expect(html).toContain('data-fullscreen');
+            expect(html).toContain('data-nav="left"');
+            expect(html).toContain('data-nav="right"');
+            expect(html).toContain('data-nav="up"');
+            expect(html).toContain('data-nav="down"');
+        });
+
+        it('disables auto-rotate automatically when showNavControls is true', () => {
+            const html = $threedviewer.renderView(
+                { src: 'model.glb', showNavControls: true, autoRotate: true },
+                {},
+                '{content}',
+            );
+
+            expect(html).not.toContain('auto-rotate');
+        });
+
         it('includes alt text in aria-label', () => {
             const data = {
                 src: 'model.glb',
