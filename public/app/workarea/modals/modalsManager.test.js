@@ -11,6 +11,7 @@ import ModalStyleManager from './modals/pages/modalStyleManager.js';
 import ModalIdeviceManager from './modals/pages/modalIdeviceManager.js';
 import ModalLopd from './modals/pages/modalLopd.js';
 import ModalAssistant from './modals/pages/modalAssistant.js';
+import ModalConnectMcp from './modals/pages/modalConnectMcp.js';
 import ModalReleaseNotes from './modals/pages/modalReleaseNotes.js';
 import ModalLegalNotes from './modals/pages/modalLegalNotes.js';
 import ModalAbout from './modals/pages/modalAbout.js';
@@ -38,6 +39,7 @@ vi.mock('./modals/pages/modalStyleManager.js');
 vi.mock('./modals/pages/modalIdeviceManager.js');
 vi.mock('./modals/pages/modalLopd.js');
 vi.mock('./modals/pages/modalAssistant.js');
+vi.mock('./modals/pages/modalConnectMcp.js');
 vi.mock('./modals/pages/modalReleaseNotes.js');
 vi.mock('./modals/pages/modalLegalNotes.js');
 vi.mock('./modals/pages/modalAbout.js');
@@ -102,6 +104,7 @@ describe('ModalsManagement', () => {
       expect(ModalOdeUsedFiles).toHaveBeenCalledWith(modalsManager);
       expect(ModalLopd).toHaveBeenCalledWith(modalsManager);
       expect(ModalAssistant).toHaveBeenCalledWith(modalsManager);
+      expect(ModalConnectMcp).toHaveBeenCalledWith(modalsManager);
       expect(ModalReleaseNotes).toHaveBeenCalledWith(modalsManager);
       expect(ModalLegalNotes).toHaveBeenCalledWith(modalsManager);
       expect(ModalAbout).toHaveBeenCalledWith(modalsManager);
@@ -133,8 +136,9 @@ describe('ModalsManagement', () => {
     it('should return an array of all modals', () => {
       modalsManager.init();
       const list = modalsManager.list();
-      expect(list).toHaveLength(24); // GlobalSearch is 24th
+      expect(list).toHaveLength(25); // GlobalSearch is 25th
       expect(list).toContain(modalsManager.alert);
+      expect(list).toContain(modalsManager.connectmcp);
       expect(list).toContain(modalsManager.share);
       expect(list).toContain(modalsManager.printpreview);
       expect(list).toContain(modalsManager.imageoptimizer);

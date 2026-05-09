@@ -804,7 +804,7 @@ function generateMenuHeadBottomHtml(): string {
  * Read and convert Nunjucks modal templates to static HTML
  * Replaces {{ 'string' | trans }} with the string itself
  */
-function generateModalsHtml(): string {
+export function generateModalsHtml(): string {
     const modalsDir = path.join(projectRoot, 'views/workarea/modals');
     const modalFiles = [
         'generic/modalAlert.njk',
@@ -820,6 +820,7 @@ function generateModalsHtml(): string {
         'pages/odeusedfiles.njk',
         'pages/lopd.njk',
         'pages/assistant.njk',
+        'pages/connectmcp.njk',
         'pages/releasenotes.njk',
         'pages/legalnotes.njk',
         'pages/about.njk',
